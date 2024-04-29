@@ -64,6 +64,14 @@ namespace Aero.Gen
                 }
             },
             {
+                "bool", new AeroTypeHandler
+                {
+                    Size   = 1,
+                    Reader = (name, typeCast) => $"{name} = {typeCast}(data[offset] == 1);",
+                    Writer = (name, typeCast) => $"buffer[offset] = {typeCast}((byte)({name} ? 1 : 0));",
+                }
+            },
+            {
                 "char", new AeroTypeHandler
                 {
                     Size   = 1,
@@ -376,14 +384,26 @@ namespace Aero.Gen
             var fileName    = $"{ns}.{cn}.Aero.cs";
             var sm          = SyntaxReceiver.Context.Compilation.GetSemanticModel(cd.SyntaxTree);
             var isViewClass = AgUtils.IsViewClass(cd, sm);
+            var isEncounterClass = AgUtils.IsEncounterClass(cd, sm);
 
             AddLines(
                 $"// Aero Generated file, not a not a good idea to edit :>",
                 $"// {DateTime.Now.ToLongDateString()} {DateTime.Now.ToLongTimeString()}");
             AddUsings();
             AddLine();
-            using (Namespace(ns)) {
-                using (Class(cn, isViewClass ? " : Aero.Gen.IAeroViewInterface" : " : Aero.Gen.IAero")) {
+            using (Namespace(ns))
+            {
+                var iface = " : Aero.Gen.IAero";
+                if (isViewClass)
+                {
+                    iface = " : Aero.Gen.IAeroViewInterface";
+
+                    if (isEncounterClass)
+                    {
+                        iface = " : Aero.Gen.IAeroEncounter";
+                    }
+                }
+                using (Class(cn, iface)) {
                     if (Config.DiagLogging) AddDiagBoilerplate();
 
                 #if DEBUG
@@ -400,16 +420,24 @@ namespace Aero.Gen
 
                     AddLine();
 
-                    CreateReaderV2(cd);
-                    AddLine();
+                    if (!isEncounterClass)
+                    {
+                        CreateReaderV2(cd);
+                        AddLine();
 
-                    CreateGetPackedSizeV2(cd);
-                    AddLine();
+                        CreateGetPackedSizeV2(cd);
+                        AddLine();
 
-                    CreatePackerV2(cd);
-                    AddLine();
+                        CreatePackerV2(cd);
+                        AddLine();
+                    }
 
                     if (isViewClass) {
+                        if (isEncounterClass)
+                        {
+                            GenerateEncounterClassMembers(cd, sm);
+                        }
+
                         GenerateViewFunctions(cd, sm);
                     }
 
@@ -483,7 +511,7 @@ namespace Aero.Gen
             }
         }
 
-        private int CreateUnpackerOnNode(bool isView, AeroNode node, ref int nullableIdx)
+        private int CreateUnpackerOnNode(bool isView, AeroNode node, ref int nullableIdx, bool isEncounter = false)
         {
             if (node.IsNullable) {
                 if (isView) {
@@ -501,6 +529,20 @@ namespace Aero.Gen
 
             if (Config.DiagLogging && node is not AeroArrayNode && node is not AeroIfNode) {
                 //AddLine("offsetBefore = offset;");
+            }
+
+            if (isEncounter && node.Parent is AeroArrayNode)
+            {
+                AddLines("// Encounter arrays contain both field index and array index before values,",
+                        "// index of the first is element is handled at the beginning of the 'do while' loop");
+                using (If($"idx{node.Parent.Depth} == 0"))
+                {
+                    AddLine("offset++;");
+                }
+                using (Else())
+                {
+                    AddLine("offset += 2;");
+                }
             }
 
             if (node is AeroFieldNode fieldNode) {
@@ -526,7 +568,7 @@ namespace Aero.Gen
 
             LogDiagRead(node);
 
-            if (isView && node.IsNullable) {
+            if ((isView) && node.IsNullable) {
                 UnIndent();
                 if (node is not AeroBlockNode) AddLine("}");
             }
@@ -599,7 +641,8 @@ namespace Aero.Gen
                 AddLine();
 
                 var isView = AgUtils.IsViewClass(cd, SyntaxReceiver.Context.Compilation.GetSemanticModel(cd.SyntaxTree));
-                if (isView) {
+                var isEncounter = AgUtils.IsEncounterClass(cd, SyntaxReceiver.Context.Compilation.GetSemanticModel(cd.SyntaxTree));
+                if (isView && !isEncounter) {
                     AddLine("// Nullable bitfields fields");
                     var numNullableBitFields = Math.Ceiling((double) GetNumNullableFields(cd) / 8);
                     AddLine($"offset += {numNullableBitFields};");
@@ -719,7 +762,8 @@ namespace Aero.Gen
                 AddLine();
 
                 var isView = AgUtils.IsViewClass(cd, SyntaxReceiver.Context.Compilation.GetSemanticModel(cd.SyntaxTree));
-                if (isView) {
+                var isEncounter = AgUtils.IsEncounterClass(cd, SyntaxReceiver.Context.Compilation.GetSemanticModel(cd.SyntaxTree));
+                if (isView && !isEncounter) {
                     AddLine("// Nullable bitfields fields");
 
                     //AddLine("UpdateNullableBitFields();");
@@ -743,7 +787,7 @@ namespace Aero.Gen
             }
         }
 
-        private void CreatePackerOnNode(AeroNode node, bool noNullableCheck = false)
+        private void CreatePackerOnNode(AeroNode node, bool noNullableCheck = false, bool isEncounter = false, int fieldIdx = -1)
         {
             if (node.IsNullable && noNullableCheck) {
                 AddLine($"if ({node.GetFullName()}Prop.HasValue)"); // TODO: use bitfield
@@ -751,6 +795,11 @@ namespace Aero.Gen
                 Indent();
             }
 
+            if (isEncounter && node.Parent is AeroArrayNode)
+            {
+                AddLine($"buffer[offset++] = {fieldIdx};");
+                AddLine($"buffer[offset++] = (byte)idx{node.Parent.Depth};");
+            }
 
             if (node is AeroFieldNode fieldNode) {
                 var name = fieldNode.IsNullable ? $"{fieldNode.GetFullName()}" : fieldNode.GetFullName();
